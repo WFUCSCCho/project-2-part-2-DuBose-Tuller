@@ -65,7 +65,7 @@ int main(int argc, char **argv)
     cout << "Image dimensions:" << endl;
     cout << "height: " << height << " width: " << width << endl;
 
-    cout << "Converting " << argv[1] << " from color to grayscale..." << endl;
+    cout << "Blurring " << argv[1] << endl;
 
     //Transform image into vector of doubles
     vector<uchar3> input_image;
