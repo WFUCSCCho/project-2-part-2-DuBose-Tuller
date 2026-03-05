@@ -4,7 +4,7 @@
 #include <cuda.h>
 #include <vector_types.h>
 
-#define BLUR_SIZE 4 // size of surrounding image is 2X this
+#define BLUR_SIZE 8 // size of surrounding image is 2X this
 #define TILE_WIDTH 16
 
 #include "bitmap_image.hpp"
@@ -29,8 +29,33 @@ using namespace std;
 __global__ void blurKernel (uchar3 *in, uchar3 *out, int width, int height) {
     __shared__ uchar3 ds_in_border[TILE_WIDTH + 2*BLUR_SIZE][TILE_WIDTH + 2*BLUR_SIZE];
 
+    int block_thread_lin = threadIdx.y * blockDim.x + threadIdx.x;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
 	int row = blockIdx.y * blockDim.y + threadIdx.y;
+
+    // Load data into shared memory. Each thread loads multiple entries
+    //  to account for the pixels outside of the block used in the blur
+    //  
+    // We linearize the threads in the block, and skip by block (2D) size (= #threads),
+    //  which evenly distributes the number of entries loaded by each thread    
+    for (int i = block_thread_lin; i < (TILE_WIDTH + 2*BLUR_SIZE)*(TILE_WIDTH + 2*BLUR_SIZE); i+= TILE_WIDTH*TILE_WIDTH) {
+        // Convert to 2D row/col for thread relative to block
+        int ds_row = i / (TILE_WIDTH + 2*BLUR_SIZE);
+        int ds_col = i % (TILE_WIDTH + 2*BLUR_SIZE);
+
+        int g_row = blockIdx.y * TILE_WIDTH + ds_row - BLUR_SIZE;
+        int g_col = blockIdx.x * TILE_WIDTH + ds_col - BLUR_SIZE;
+
+        // global image bound
+        if (g_row > -1 && g_row < height && g_col > -1 && g_col < width) {
+            ds_in_border[ds_row][ds_col] = in[g_row * width + g_col];
+        } else {
+            // Prevent undefined behavior
+            ds_in_border[ds_row][ds_col] = {0,0,0};
+        }
+    }
+
+    __syncthreads();
 
 	if (col < width && row < height) {
 		int3 pixVal;
@@ -39,22 +64,18 @@ __global__ void blurKernel (uchar3 *in, uchar3 *out, int width, int height) {
 
 		// get the average of the surrounding 2xBLUR_SIZE x 2xBLUR_SIZE box
 		for(int blurRow = -BLUR_SIZE; blurRow < BLUR_SIZE + 1; blurRow++) {
-			for(int blurCol = -BLUR_SIZE; blurCol < BLUR_SIZE + 1; blurCol++) {
-
-				int curRow = row + blurRow;
-				int curCol = col + blurCol;
+			for (int blurCol = -BLUR_SIZE; blurCol < BLUR_SIZE + 1; blurCol++) {
+				// Position in ds_in_border depends on thread
+                int curRow = threadIdx.y + BLUR_SIZE + blurRow;
+				int curCol = threadIdx.x + BLUR_SIZE + blurCol;
 
 				// verify that we have a valid image pixel
 				if(curRow > -1 && curRow < height && curCol > -1 && curCol < width) {
                     // Load entries into block shared memory
-                    ds_in_border[curRow][curCol] = in[curRow * width + curCol];
-                    __syncthreads();
-
 					pixVal.x += ds_in_border[curRow][curCol].x;
 					pixVal.y += ds_in_border[curRow][curCol].y;
 					pixVal.z += ds_in_border[curRow][curCol].z;
 					pixels++; // keep track of number of pixels in the accumulated total
-                    __syncthreads();
 				}
 			}
 		}
