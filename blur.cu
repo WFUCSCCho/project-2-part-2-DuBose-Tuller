@@ -4,7 +4,7 @@
 #include <cuda.h>
 #include <vector_types.h>
 
-#define BLUR_SIZE 2 // size of surrounding image is 2X this
+#define BLUR_SIZE 4 // size of surrounding image is 2X this
 
 #include "bitmap_image.hpp"
 
@@ -77,8 +77,8 @@ int main(int argc, char **argv) {
     //Transform image into vector of doubles
     vector<uchar3> input_image;
     rgb_t color;
-    for(int x = 0; x < width; x++) {
-        for(int y = 0; y < height; y++) {
+    for(int y = 0; y < height; y++) {
+        for(int x = 0; x < width; x++) {
             bmp.get_pixel(x, y, color);
             input_image.push_back( {color.red, color.green, color.blue} );
         }
@@ -114,9 +114,9 @@ int main(int argc, char **argv) {
     printf("Kernel execution time: %f ms\n", milliseconds);
     
     //Set updated pixels
-    for(int x = 0; x < width; x++) {
-        for(int y = 0; y < height; y++) {
-            int pos = x * height + y;
+    for(int y = 0; y < height; y++) {
+        for(int x = 0; x < width; x++) {
+            int pos = y * width + x;
             bmp.set_pixel(x, y, output_image[pos].x, output_image[pos].y, output_image[pos].z);
         }
     }
