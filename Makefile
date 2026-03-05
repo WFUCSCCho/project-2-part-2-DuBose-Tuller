@@ -1,5 +1,8 @@
-sequential:
+blur:
 	nvcc -o blur blur.cu
 
+tiled: 
+	nvcc -o blurTiled blurTiled.cu
+
 clean:
-	rm -f blur *.o
+	rm -f blur blurTiled *.o
