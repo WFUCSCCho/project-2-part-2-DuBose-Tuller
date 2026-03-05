@@ -4,7 +4,7 @@
 #include <cuda.h>
 #include <vector_types.h>
 
-#define BLUR_SIZE 16 // size of surrounding image is 2X this
+#define BLUR_SIZE 2 // size of surrounding image is 2X this
 
 #include "bitmap_image.hpp"
 
@@ -53,8 +53,7 @@ __global__ void blurKernel (uchar3 *in, uchar3 *out, int width, int height) {
  }
 }
 
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
     if (argc != 2) {
         cerr << "format: " << argv[0] << " { 24-bit BMP Image Filename }" << endl;
         exit(1);
@@ -62,8 +61,7 @@ int main(int argc, char **argv)
     
     bitmap_image bmp(argv[1]);
 
-    if(!bmp)
-    {
+    if(!bmp) {
         cerr << "Image not found" << endl;
         exit(1);
     }
@@ -79,10 +77,8 @@ int main(int argc, char **argv)
     //Transform image into vector of doubles
     vector<uchar3> input_image;
     rgb_t color;
-    for(int x = 0; x < width; x++)
-    {
-        for(int y = 0; y < height; y++)
-        {
+    for(int x = 0; x < width; x++) {
+        for(int y = 0; y < height; y++) {
             bmp.get_pixel(x, y, color);
             input_image.push_back( {color.red, color.green, color.blue} );
         }
@@ -118,10 +114,8 @@ int main(int argc, char **argv)
     printf("Kernel execution time: %f ms\n", milliseconds);
     
     //Set updated pixels
-    for(int x = 0; x < width; x++)
-    {
-        for(int y = 0; y < height; y++)
-        {
+    for(int x = 0; x < width; x++) {
+        for(int y = 0; y < height; y++) {
             int pos = x * height + y;
             bmp.set_pixel(x, y, output_image[pos].x, output_image[pos].y, output_image[pos].z);
         }
