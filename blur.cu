@@ -113,6 +113,9 @@ int main(int argc, char **argv)
     CHECK_CUDA(cudaEventRecord(stop));
     CHECK_CUDA(cudaEventSynchronize(stop));
     
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    printf("Kernel execution time: %f ms\n", milliseconds);
     
     //Set updated pixels
     for(int x = 0; x < width; x++)
