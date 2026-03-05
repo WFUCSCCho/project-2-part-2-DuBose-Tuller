@@ -5,6 +5,7 @@
 #include <vector_types.h>
 
 #define BLUR_SIZE 4 // size of surrounding image is 2X this
+#define TILE_WIDTH 16
 
 #include "bitmap_image.hpp"
 
@@ -26,7 +27,9 @@ using namespace std;
 //        <-- blur_height -->
 // capped by image dims
 __global__ void blurKernel (uchar3 *in, uchar3 *out, int width, int height) {
-	int col = blockIdx.x * blockDim.x + threadIdx.x;
+    __shared__ uchar3 ds_in_border[TILE_WIDTH + 2*BLUR_SIZE][TILE_WIDTH + 2*BLUR_SIZE];
+
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
 	int row = blockIdx.y * blockDim.y + threadIdx.y;
 
 	if (col < width && row < height) {
@@ -43,10 +46,15 @@ __global__ void blurKernel (uchar3 *in, uchar3 *out, int width, int height) {
 
 				// verify that we have a valid image pixel
 				if(curRow > -1 && curRow < height && curCol > -1 && curCol < width) {
-					pixVal.x += in[curRow * width + curCol].x;
-					pixVal.y += in[curRow * width + curCol].y;
-					pixVal.z += in[curRow * width + curCol].z;
+                    // Load entries into block shared memory
+                    ds_in_border[curRow][curCol] = in[curRow * width + curCol];
+                    __syncthreads();
+
+					pixVal.x += ds_in_border[curRow][curCol].x;
+					pixVal.y += ds_in_border[curRow][curCol].y;
+					pixVal.z += ds_in_border[curRow][curCol].z;
 					pixels++; // keep track of number of pixels in the accumulated total
+                    __syncthreads();
 				}
 			}
 		}
@@ -99,8 +107,8 @@ int main(int argc, char **argv) {
     CHECK_CUDA(cudaMemcpy(d_in, input_image.data(), img_size, cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(d_out, input_image.data(), img_size, cudaMemcpyHostToDevice));
 
-    dim3 dimGrid(ceil(width / 16), ceil(height / 16), 1);
-    dim3 dimBlock(16, 16, 1);
+    dim3 dimGrid(ceil(width / TILE_WIDTH), ceil(height / TILE_WIDTH));
+    dim3 dimBlock(TILE_WIDTH, TILE_WIDTH);
 
     cudaEvent_t start, stop;
     CHECK_CUDA(cudaEventCreate(&start));
