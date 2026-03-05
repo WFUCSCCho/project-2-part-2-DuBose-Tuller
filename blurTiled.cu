@@ -26,37 +26,36 @@ using namespace std;
 //        <-- blur_height -->
 // capped by image dims
 __global__ void blurKernel (uchar3 *in, uchar3 *out, int width, int height) {
+	int col = blockIdx.x * blockDim.x + threadIdx.x;
+	int row = blockIdx.y * blockDim.y + threadIdx.y;
 
- int col = blockIdx.x * blockDim.x + threadIdx.x;
- int row = blockIdx.y * blockDim.y + threadIdx.y;
+	if (col < width && row < height) {
+		int3 pixVal;
+		pixVal.x = 0; pixVal.y = 0; pixVal.z = 0;
+		int pixels = 0;
 
- if (col < width && row < height) {
-  int3 pixVal;
-  pixVal.x = 0; pixVal.y = 0; pixVal.z = 0;
-  int pixels = 0;
+		// get the average of the surrounding 2xBLUR_SIZE x 2xBLUR_SIZE box
+		for(int blurRow = -BLUR_SIZE; blurRow < BLUR_SIZE + 1; blurRow++) {
+			for(int blurCol = -BLUR_SIZE; blurCol < BLUR_SIZE + 1; blurCol++) {
 
-  // get the average of the surrounding 2xBLUR_SIZE x 2xBLUR_SIZE box
-  for(int blurRow = -BLUR_SIZE; blurRow < BLUR_SIZE + 1; blurRow++) {
-   for(int blurCol = -BLUR_SIZE; blurCol < BLUR_SIZE + 1; blurCol++) {
+				int curRow = row + blurRow;
+				int curCol = col + blurCol;
 
-    int curRow = row + blurRow;
-    int curCol = col + blurCol;
+				// verify that we have a valid image pixel
+				if(curRow > -1 && curRow < height && curCol > -1 && curCol < width) {
+					pixVal.x += in[curRow * width + curCol].x;
+					pixVal.y += in[curRow * width + curCol].y;
+					pixVal.z += in[curRow * width + curCol].z;
+					pixels++; // keep track of number of pixels in the accumulated total
+				}
+			}
+		}
 
-    // verify that we have a valid image pixel
-    if(curRow > -1 && curRow < height && curCol > -1 && curCol < width) {
-     pixVal.x += in[curRow * width + curCol].x;
-     pixVal.y += in[curRow * width + curCol].y;
-     pixVal.z += in[curRow * width + curCol].z;
-     pixels++; // keep track of number of pixels in the accumulated total
-    }
-   }
-  }
-
-  // write our new pixel value out
-  out[row * width + col].x = (unsigned char)(pixVal.x / pixels);
-  out[row * width + col].y = (unsigned char)(pixVal.y / pixels);
-  out[row * width + col].z = (unsigned char)(pixVal.z / pixels);
- }
+		// write our new pixel value out
+		out[row * width + col].x = (unsigned char)(pixVal.x / pixels);
+		out[row * width + col].y = (unsigned char)(pixVal.y / pixels);
+		out[row * width + col].z = (unsigned char)(pixVal.z / pixels);
+	}
 }
 
 int main(int argc, char **argv) {
