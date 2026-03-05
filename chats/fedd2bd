@@ -1,0 +1,82 @@
+This code works just fine for images/grumpy.bmp, which was included as a starter image for this project (outlined in @README.md), but my own images that are in the same folder do not work. bitmap_image::load_bitmap() ERROR: bitmap_image - Invalid BIH size 0 expected 40
+Image not found is what I get. Is there something wrong with the images and how I converted them (magick on my mac)
+Let me look at your code and understand what's happening.
+
+Read blur.cu
+Bash Check file types of BMP files
+IN
+file /deac/csc/classes/csc347-sp-2026/tullwd25/project-2-part-2-DuBose-Tuller/*.bmp 2>/dev/null | head -20
+
+OUT
+/deac/csc/classes/csc347-sp-2026/tullwd25/project-2-part-2-DuBose-Tuller/blurred.bmp: data
+Bash Check all BMP files
+IN
+file /deac/csc/classes/csc347-sp-2026/tullwd25/project-2-part-2-DuBose-Tuller/*.bmp 2>/dev/null
+
+OUT
+/deac/csc/classes/csc347-sp-2026/tullwd25/project-2-part-2-DuBose-Tuller/blurred.bmp: data
+Bash List directory contents
+IN
+ls /deac/csc/classes/csc347-sp-2026/tullwd25/project-2-part-2-DuBose-Tuller/
+
+OUT
+bitmap_image.hpp
+blur
+blur.cu
+blurred
+blurred.bmp
+images
+Makefile
+README.md
+Bash List images and blurred directories
+IN
+ls /deac/csc/classes/csc347-sp-2026/tullwd25/project-2-part-2-DuBose-Tuller/images/ 2>/dev/null; ls /deac/csc/classes/csc347-sp-2026/tullwd25/project-2-part-2-DuBose-Tuller/blurred/ 2>/dev/null
+
+OUT
+grumpy.bmp
+meme0.bmp
+meme1.bmp
+snow.bmp
+grumpy.bmp
+Bash Check BMP file types and formats
+IN
+file /deac/csc/classes/csc347-sp-2026/tullwd25/project-2-part-2-DuBose-Tuller/images/*.bmp
+
+OUT
+/deac/csc/classes/csc347-sp-2026/tullwd25/project-2-part-2-DuBose-Tuller/images/grumpy.bmp: data
+/deac/csc/classes/csc347-sp-2026/tullwd25/project-2-part-2-DuBose-Tuller/images/meme0.bmp:  PC bitmap, Windows 98/2000 and newer format, 562 x 405 x 8
+/deac/csc/classes/csc347-sp-2026/tullwd25/project-2-part-2-DuBose-Tuller/images/meme1.bmp:  PC bitmap, Windows 98/2000 and newer format, 1027 x 1166 x 24
+/deac/csc/classes/csc347-sp-2026/tullwd25/project-2-part-2-DuBose-Tuller/images/snow.bmp:   PC bitmap, Windows 98/2000 and newer format, 1024 x 768 x 24
+Found the issue. Look at the output:
+
+grumpy.bmp — shows as just data (likely a different/corrupt format, but it's the one that works for your program — probably a valid 24-bit BMP without modern headers)
+meme0.bmp — 8-bit color depth (the x 8 at the end)
+meme1.bmp — 24-bit, but "Windows 98/2000 and newer format"
+snow.bmp — 24-bit, but same newer format
+Two problems:
+
+1. meme0.bmp is 8-bit (grayscale/palette), not 24-bit RGB.
+
+The bitmap_image library expects 24-bit BMP. When you converted with ImageMagick on Mac, it likely saved it as an 8-bit BMP. The BIH (bitmap info header) for an 8-bit image has a different structure than 24-bit, which causes the "Invalid BIH size 0" error.
+
+2. The "Windows 98/2000 and newer format" likely means your images use a BITMAPV4HEADER or BITMAPV5HEADER (size 108 or 124 bytes) instead of the standard BITMAPINFOHEADER (size 40 bytes). The library only accepts size 40 — that's exactly what the error says: "Invalid BIH size 0 expected 40".
+
+Fix: Re-convert your images on your Mac forcing 24-bit BMP with the older DIB header:
+
+
+magick input.jpg -type TrueColor -define bmp:format=bmp3 output.bmp
+The key flags are:
+
+-type TrueColor — forces 24-bit RGB (fixes meme0.bmp)
+-define bmp:format=bmp3 — forces the older BMP3 format with the 40-byte BITMAPINFOHEADER that bitmap_image.hpp expects (fixes meme1.bmp and snow.bmp)
+You can verify afterward with file output.bmp — it should say PC bitmap, Windows 3.x format (not Windows 98/2000 and newer format).
+
+Wait it might have to be 8bit color looking at @blur.cu, since the pixel values for each channel are interpreted as unsigned chars
+Looking at blur.cu, it uses uchar3 (three unsigned chars = 3 bytes = 24-bit RGB). That's definitely 24-bit, not 8-bit.
+
+The unsigned char per channel is just how 24-bit color works — one byte (0–255) per R, G, B channel. 8-bit color means one byte for the entire pixel, using a color palette lookup table, which is a completely different format.
+
+So your images need to be 24-bit BMP. The magick command I gave you is correct:
+
+
+magick input.jpg -type TrueColor -define bmp:format=bmp3 output.bmp
