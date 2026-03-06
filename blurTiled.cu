@@ -27,7 +27,7 @@ using namespace std;
 //        <-- blur_height -->
 // capped by image dims
 __global__ void blurKernel (uchar3 *in, uchar3 *out, int width, int height) {
-    __shared__ uchar3 ds_in_border[TILE_WIDTH + 2*BLUR_SIZE][TILE_WIDTH + 2*BLUR_SIZE];
+    __shared__ uchar3 ds_img_block[TILE_WIDTH + 2*BLUR_SIZE][TILE_WIDTH + 2*BLUR_SIZE];
 
     int block_thread_lin = threadIdx.y * blockDim.x + threadIdx.x;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
@@ -48,10 +48,10 @@ __global__ void blurKernel (uchar3 *in, uchar3 *out, int width, int height) {
 
         // global image bound
         if (g_row > -1 && g_row < height && g_col > -1 && g_col < width) {
-            ds_in_border[ds_row][ds_col] = in[g_row * width + g_col];
+            ds_img_block[ds_row][ds_col] = in[g_row * width + g_col];
         } else {
             // Prevent undefined behavior
-            ds_in_border[ds_row][ds_col] = {0,0,0};
+            ds_img_block[ds_row][ds_col] = {0,0,0};
         }
     }
 
@@ -65,16 +65,16 @@ __global__ void blurKernel (uchar3 *in, uchar3 *out, int width, int height) {
 		// get the average of the surrounding 2xBLUR_SIZE x 2xBLUR_SIZE box
 		for(int blurRow = -BLUR_SIZE; blurRow < BLUR_SIZE + 1; blurRow++) {
 			for (int blurCol = -BLUR_SIZE; blurCol < BLUR_SIZE + 1; blurCol++) {
-				// Position in ds_in_border depends on thread
+				// Position in ds_img_block depends on thread
                 int curRow = threadIdx.y + BLUR_SIZE + blurRow;
 				int curCol = threadIdx.x + BLUR_SIZE + blurCol;
 
 				// verify that we have a valid image pixel
 				if(curRow > -1 && curRow < height && curCol > -1 && curCol < width) {
                     // Load entries into block shared memory
-					pixVal.x += ds_in_border[curRow][curCol].x;
-					pixVal.y += ds_in_border[curRow][curCol].y;
-					pixVal.z += ds_in_border[curRow][curCol].z;
+					pixVal.x += ds_img_block[curRow][curCol].x;
+					pixVal.y += ds_img_block[curRow][curCol].y;
+					pixVal.z += ds_img_block[curRow][curCol].z;
 					pixels++; // keep track of number of pixels in the accumulated total
 				}
 			}
