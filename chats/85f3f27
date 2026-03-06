@@ -1,0 +1,236 @@
+Can you help me work through the idea of using a shared memory to load a whole block + max posiible border for an image blur kernel I have here? I am trying to combine working versions in @blur.cu (no tiling), and this tiled matmul code:  
+#include <iostream>
+#include <vector>
+#include <cuda.h>
+#include <vector_types.h>
+#include <curand.h>
+#include <curand_kernel.h>
+
+// Max threads for each dimension of a 2D block
+#ifndef TILE_WIDTH
+#define TILE_WIDTH 16
+#endif
+
+using namespace std;
+
+// Helper macro for error checking
+#define CHECK_CUDA(call) { \
+    cudaError_t err = call; \
+    if (err != cudaSuccess) { \
+        printf("CUDA Error: %s at line %d\n", cudaGetErrorString(err), __LINE__); \
+        exit(1); \
+    } \
+}
+
+void printMatrix(float *A, int n) {
+    for (int i=0; i<n; ++i) {
+        for (int j=0; j<n; ++j) {
+            printf("%f\t", A[i*n + j]);
+        }
+        printf("\n");
+    }
+}
+
+void writeMatrix(FILE *f, float *A, int n) {
+    if (f == NULL) {
+        printf("Error opening file");
+        exit(4);
+    }
+    for (int i=0; i<n; ++i) {
+        for (int j=0; j<n; ++j) {
+            fprintf(f, "%f\t", A[i*n + j]);
+        }
+        fprintf(f, "\n");
+    }
+}
+
+// Separating init makes the generation kernel much faster
+__global__ void setup_kernel(curandState_t* states, unsigned long seed, int n) {
+    int col = threadIdx.x + blockIdx.x * blockDim.x;
+    int row = threadIdx.y + blockIdx.y * blockDim.y;
+    if (row < n && col < n) {
+        int idx = row * n + col;
+        curand_init(seed, idx, 0, &states[idx]);
+    }
+}
+
+__global__ void generateRandomNumbers(curandState_t* states, float* numbers, int n) {
+    int col = threadIdx.x + blockIdx.x * blockDim.x;
+    int row = threadIdx.y + blockIdx.y * blockDim.y;
+
+    if (row < n && col < n) {
+        int idx = row * n + col;
+        // Use a local copy of the state for efficiency
+        curandState_t localState = states[idx];
+        numbers[idx] = curand_uniform(&localState);
+        // Save the state back if you plan to call this kernel again
+        states[idx] = localState;
+    }
+}
+
+__global__ void MatrixMulKernel(float* A, float* B, float* C, int n) {
+    __shared__ float ds_A[TILE_WIDTH][TILE_WIDTH];
+    __shared__ float ds_B[TILE_WIDTH][TILE_WIDTH];
+
+    int bx = blockIdx.x; int by = blockIdx.y;
+    int tx = threadIdx.x; int ty = threadIdx.y;
+
+    int row = by * blockDim.y + ty;
+    int col = bx * blockDim.x + tx;
+    float c_ij = 0;
+
+    if (row < n && col < n) {
+        // Loop over the M and N tiles required to compute the C_ij element
+        for (int k = 0; k <= (n-1)/TILE_WIDTH; ++k) {
+            // collaborative loading of A and B tiles into shared memory
+            ds_A[ty][tx] = A[row*n + k*TILE_WIDTH+tx];
+            ds_B[ty][tx] = B[(k*TILE_WIDTH+ty)*n + col];
+            __syncthreads();
+
+            for (int i = 0; i < TILE_WIDTH; ++i) {
+                c_ij += ds_A[ty][i] * ds_B[i][tx];
+            }
+            
+            __syncthreads();
+        }
+        C[row*n+col] = c_ij;
+    }
+}
+
+Don't write any code
+Here's the conceptual approach:
+
+Key Idea
+In the tiled matmul, each block loads exactly a TILE_WIDTH x TILE_WIDTH tile. For tiled blur, each block needs to load its TILE_WIDTH x TILE_WIDTH output region plus a border of BLUR_SIZE pixels on each side, since edge threads need neighbors that belong to adjacent blocks.
+
+Shared Memory Dimensions
+The shared memory tile needs to be:
+
+
+(TILE_WIDTH + 2*BLUR_SIZE) x (TILE_WIDTH + 2*BLUR_SIZE)
+So with TILE_WIDTH=16 and BLUR_SIZE=4, that's a 24x24 shared memory array.
+
+Loading Phase (collaborative, like matmul)
+This is trickier than matmul because you have more pixels to load than threads. Each block has TILE_WIDTH^2 = 256 threads but 24x24 = 576 pixels to load.
+
+Each thread must load multiple pixels into shared memory. A common pattern: use a flat thread index (ty*TILE_WIDTH + tx) and loop with stride TILE_WIDTH*TILE_WIDTH to cover all shared memory positions.
+
+For each position in shared memory, the corresponding global image coordinate is:
+
+
+global_row = blockIdx.y * TILE_WIDTH + shared_row - BLUR_SIZE
+global_col = blockIdx.x * TILE_WIDTH + shared_col - BLUR_SIZE
+Out-of-bounds pixels (image edges) get clamped to 0 or the nearest pixel — your current kernel just skips them (counts fewer pixels), so you'd replicate that logic here.
+
+Compute Phase
+After __syncthreads(), each thread computes its blur only from shared memory — the blur loop reads from shared_mem[ty + BLUR_SIZE + blurRow][tx + BLUR_SIZE + blurCol] instead of global in[].
+
+The +BLUR_SIZE offset accounts for the border you loaded into shared memory.
+
+Key Differences from Matmul
+Matmul	Blur
+Multiple tile phases (loop over k)	Single load phase
+1:1 thread-to-load ratio	Many-to-one (threads load multiple cells)
+Both tiles same size	One tile (no second matrix)
+No boundary clamping needed	Must handle image edges
+__syncthreads() placement
+You need exactly one sync: after all threads finish loading shared memory, before any thread starts computing. Unlike matmul, there's no loop requiring a second sync.
+
+So what need to change in this implementation besides loading more entries into ds_in_border[] than the current thread? I'll note that I'm currently getting an out of bounds issue as the result of this program
+Let me read the current blurTiled.cu file.
+
+Read blurTiled.cu
+There are several issues here beyond the multi-load problem:
+
+Issue 1: Out-of-bounds index into ds_in_border (your crash)
+Line 50: ds_in_border[curRow][curCol] — you're indexing with global image coordinates (curRow, curCol), but ds_in_border is only (TILE_WIDTH + 2*BLUR_SIZE) wide. For any pixel beyond row/col 24, this is an out-of-bounds array access.
+
+The shared memory indices need to be local to the tile, offset by BLUR_SIZE:
+
+
+shared_row = threadIdx.y + BLUR_SIZE + blurRow
+shared_col = threadIdx.x + BLUR_SIZE + blurCol
+Issue 2: __syncthreads() inside a conditional branch
+Line 51 is inside if(curRow > -1 && curRow < height ...). __syncthreads() must be reached by all threads in the block or you get undefined behavior/deadlock. The sync must happen after the entire loading phase, outside all conditionals.
+
+Issue 3: Loading happens inside the blur loop (wrong phase)
+The current structure mixes loading and computing. The correct structure is:
+
+Load phase: all threads collaboratively fill ds_in_border (loading multiple entries per thread), with proper bounds checking to handle image edges
+__syncthreads()
+Compute phase: each thread reads from ds_in_border using local shared memory indices
+Issue 4: The blur loop reads from ds_in_border before it's fully populated
+Even if thread A loads its needed neighbor, thread B may not have loaded its neighbor yet when thread A reads. The sync must happen between the two phases.
+
+Summary of what needs to change
+Add a separate loading loop before the blur computation that fills all (TILE_WIDTH + 2*BLUR_SIZE)^2 entries, with each thread loading multiple cells (stride by TILE_WIDTH*TILE_WIDTH)
+Use local shared memory indices (offset by BLUR_SIZE), not global image coordinates, everywhere in ds_in_border
+Move __syncthreads() to after the loading loop, outside any conditional
+In the blur compute loop, read from ds_in_border[threadIdx.y + BLUR_SIZE + blurRow][threadIdx.x + BLUR_SIZE + blurCol] instead of from global in[]
+Ok I make a separate load loop, moved the sync, and updated curRow/Col to be based on the current thread.
+
+A common pattern: use a flat thread index (ty*TILE_WIDTH + tx) and loop with stride TILE_WIDTH*TILE_WIDTH to cover all shared memory positions. 
+
+Can you explain this more? My first thought was to attempt to load all valid pixel based on the blur size of that thread (e.g. 8x8 grid around the thread), so I'd use the same loop structure add the compute phase
+Your approach (each thread loads its own blur neighborhood) has a fundamental problem: threads overlap massively. Thread (0,0) and thread (1,0) both try to load many of the same shared memory cells, causing races with no guarantee of correctness.
+
+The flat-index pattern
+The idea is to treat the 2D block of threads as a 1D array of workers, and the 2D shared memory tile as a 1D array of work items, then distribute evenly:
+
+
+Total shared memory cells: (TILE_WIDTH + 2*BLUR_SIZE)^2  = 24*24 = 576
+Total threads per block:    TILE_WIDTH^2                  = 16*16 = 256
+So each thread loads ~2.25 cells on average. You give each thread a starting index and step by the total thread count:
+
+
+flat_thread = threadIdx.y * TILE_WIDTH + threadIdx.x   // 0..255
+
+for (int i = flat_thread; i < (TILE_WIDTH+2*BLUR_SIZE)*(TILE_WIDTH+2*BLUR_SIZE); i += TILE_WIDTH*TILE_WIDTH) {
+    // convert flat index i back to 2D shared memory coordinates
+    int s_row = i / (TILE_WIDTH + 2*BLUR_SIZE);
+    int s_col = i % (TILE_WIDTH + 2*BLUR_SIZE);
+    
+    // convert shared memory coords to global image coords
+    int g_row = blockIdx.y * TILE_WIDTH + s_row - BLUR_SIZE;
+    int g_col = blockIdx.x * TILE_WIDTH + s_col - BLUR_SIZE;
+    
+    // bounds check, then load (or store 0 for out-of-bounds)
+    if (g_row >= 0 && g_row < height && g_col >= 0 && g_col < width)
+        ds_in_border[s_row][s_col] = in[g_row * width + g_col];
+    else
+        ds_in_border[s_row][s_col] = {0, 0, 0};
+}
+With 576 cells and 256 threads: threads 0–63 each load 3 cells, threads 64–255 each load 2 cells. Every cell gets loaded by exactly one thread — no races.
+
+Why your loop approach doesn't work
+With your blur loop structure, thread (0,0) would try to write ds_in_border[BLUR_SIZE-1][BLUR_SIZE-1] (the top-left of its neighborhood), and so would thread (0,1), thread (1,0), and many others. Multiple threads writing the same address is a race condition.
+
+The boundary check fix in the compute phase
+Your current compute phase check on line 60 is also wrong — curRow/curCol are shared memory indices (0..23), so checking them against height/width is meaningless. The bounds check there should be on the global coordinates:
+
+
+int g_row = row + blurRow;   // global image row
+int g_col = col + blurCol;   // global image col
+if (g_row >= 0 && g_row < height && g_col >= 0 && g_col < width)
+    // then read from ds_in_border[threadIdx.y + BLUR_SIZE + blurRow][...]
+Ok, can you explain to me in more detail what flat_thread and s_row/col mean? I think I understand the rest (skipping by #threads, getting the global row_col based on the thread)
+flat_thread (you named it block_thread_lin)
+Your block is a 2D grid of threads, but you need to assign each thread a unique number to distribute work. You flatten the 2D thread index into a single integer:
+
+
+flat_thread = threadIdx.y * blockDim.x + threadIdx.x
+(Note: your code has blockDim.y — should be blockDim.x since you're spanning columns first)
+
+For a 16x16 block this gives each thread a unique number 0–255. Thread (0,0)→0, thread (0,1)→1, ..., thread (1,0)→16, etc.
+
+s_row / s_col (shared memory coordinates)
+The shared memory array is (TILE_WIDTH + 2*BLUR_SIZE) x (TILE_WIDTH + 2*BLUR_SIZE) — a 24x24 grid. You need to assign each iteration of the loop a unique cell in that grid.
+
+i is a flat index into that 24x24 grid (0..575). To convert back to 2D:
+
+
+s_row = i / 24   // which row of shared memory (integer division)
+s_col = i % 24   // which column of shared memory (remainder)
+So i=0 → cell (0,0), i=23 → cell (0,23), i=24 → cell (1,0), etc. It's the same idea as the flat_thread calculation, just in reverse.
+
+Also note: your code has a typo on line 44 — ds_row is declared twice instead of ds_row and ds_col, and then s_row/s_col are used on lines 46–51 but never declared.

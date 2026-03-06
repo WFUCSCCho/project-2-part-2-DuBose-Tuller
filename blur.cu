@@ -4,11 +4,20 @@
 #include <cuda.h>
 #include <vector_types.h>
 
-#define BLUR_SIZE 16 // size of surrounding image is 2X this
+#define BLUR_SIZE 4 // size of surrounding image is 2X this
 
 #include "bitmap_image.hpp"
 
 using namespace std;
+
+// Helper macro for error checking
+#define CHECK_CUDA(call) { \
+    cudaError_t err = call; \
+    if (err != cudaSuccess) { \
+        printf("CUDA Error: %s at line %d\n", cudaGetErrorString(err), __LINE__); \
+        exit(1); \
+    } \
+}
 
 __global__ void blurKernel (uchar3 *in, uchar3 *out, int width, int height) {
 
@@ -44,8 +53,7 @@ __global__ void blurKernel (uchar3 *in, uchar3 *out, int width, int height) {
  }
 }
 
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
     if (argc != 2) {
         cerr << "format: " << argv[0] << " { 24-bit BMP Image Filename }" << endl;
         exit(1);
@@ -53,8 +61,7 @@ int main(int argc, char **argv)
     
     bitmap_image bmp(argv[1]);
 
-    if(!bmp)
-    {
+    if(!bmp) {
         cerr << "Image not found" << endl;
         exit(1);
     }
@@ -65,15 +72,13 @@ int main(int argc, char **argv)
     cout << "Image dimensions:" << endl;
     cout << "height: " << height << " width: " << width << endl;
 
-    cout << "Converting " << argv[1] << " from color to grayscale..." << endl;
+    cout << "Blurring " << argv[1] << endl;
 
     //Transform image into vector of doubles
     vector<uchar3> input_image;
     rgb_t color;
-    for(int x = 0; x < width; x++)
-    {
-        for(int y = 0; y < height; y++)
-        {
+    for(int y = 0; y < height; y++) {
+        for(int x = 0; x < width; x++) {
             bmp.get_pixel(x, y, color);
             input_image.push_back( {color.red, color.green, color.blue} );
         }
@@ -83,32 +88,35 @@ int main(int argc, char **argv)
 
     uchar3 *d_in, *d_out;
     int img_size = (input_image.size() * sizeof(char) * 3);
-    cudaMalloc(&d_in, img_size);
-    cudaMalloc(&d_out, img_size);
+    CHECK_CUDA(cudaMalloc(&d_in, img_size));
+    CHECK_CUDA(cudaMalloc(&d_out, img_size));
 
-    cudaMemcpy(d_in, input_image.data(), img_size, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_out, input_image.data(), img_size, cudaMemcpyHostToDevice);
+    CHECK_CUDA(cudaMemcpy(d_in, input_image.data(), img_size, cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(d_out, input_image.data(), img_size, cudaMemcpyHostToDevice));
 
-    // TODO: Fill in the correct blockSize and gridSize
-    // currently only one block with one thread is being launched
     dim3 dimGrid(ceil(width / 16), ceil(height / 16), 1);
     dim3 dimBlock(16, 16, 1);
 
-//    dim3 dimGrid(ceil(input_image.size()/1024), 1, 1);
-//    dim3 dimBlock(1024, 1, 1);
+    cudaEvent_t start, stop;
+    CHECK_CUDA(cudaEventCreate(&start));
+    CHECK_CUDA(cudaEventCreate(&stop));
 
+    CHECK_CUDA(cudaEventRecord(start));
     blurKernel<<< dimGrid , dimBlock >>> (d_in, d_out, width, height);
     cudaDeviceSynchronize();
 
-    cudaMemcpy(output_image.data(), d_out, img_size, cudaMemcpyDeviceToHost);
+    CHECK_CUDA(cudaMemcpy(output_image.data(), d_out, img_size, cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaEventRecord(stop));
+    CHECK_CUDA(cudaEventSynchronize(stop));
     
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    printf("Kernel execution time: %f ms\n", milliseconds);
     
     //Set updated pixels
-    for(int x = 0; x < width; x++)
-    {
-        for(int y = 0; y < height; y++)
-        {
-            int pos = x * height + y;
+    for(int y = 0; y < height; y++) {
+        for(int x = 0; x < width; x++) {
+            int pos = y * width + x;
             bmp.set_pixel(x, y, output_image[pos].x, output_image[pos].y, output_image[pos].z);
         }
     }

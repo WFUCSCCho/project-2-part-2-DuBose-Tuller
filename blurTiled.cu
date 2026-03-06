@@ -1,0 +1,164 @@
+#include <iostream>
+#include <vector>
+
+#include <cuda.h>
+#include <vector_types.h>
+
+#define BLUR_SIZE 8 // size of surrounding image is 2X this
+#define TILE_WIDTH 16
+
+#include "bitmap_image.hpp"
+
+using namespace std;
+
+// Helper macro for error checking
+#define CHECK_CUDA(call) { \
+    cudaError_t err = call; \
+    if (err != cudaSuccess) { \
+        printf("CUDA Error: %s at line %d\n", cudaGetErrorString(err), __LINE__); \
+        exit(1); \
+    } \
+}
+
+
+// IDEA: load all of the image data need for the block into shared memory
+//        <-- blur_height -->
+// blur_width | block size | blur_radius
+//        <-- blur_height -->
+// capped by image dims
+__global__ void blurKernel (uchar3 *in, uchar3 *out, int width, int height) {
+    __shared__ uchar3 ds_img_block[TILE_WIDTH + 2*BLUR_SIZE][TILE_WIDTH + 2*BLUR_SIZE];
+
+    int block_thread_lin = threadIdx.y * blockDim.x + threadIdx.x;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+	int row = blockIdx.y * blockDim.y + threadIdx.y;
+
+    // Load data into shared memory. Each thread loads multiple entries
+    //  to account for the pixels outside of the block used in the blur
+    //  
+    // We linearize the threads in the block, and skip by block (2D) size (= #threads),
+    //  which evenly distributes the number of entries loaded by each thread    
+    for (int i = block_thread_lin; i < (TILE_WIDTH + 2*BLUR_SIZE)*(TILE_WIDTH + 2*BLUR_SIZE); i+= TILE_WIDTH*TILE_WIDTH) {
+        // Convert to 2D row/col for thread relative to block
+        int ds_row = i / (TILE_WIDTH + 2*BLUR_SIZE);
+        int ds_col = i % (TILE_WIDTH + 2*BLUR_SIZE);
+
+        int g_row = blockIdx.y * TILE_WIDTH + ds_row - BLUR_SIZE;
+        int g_col = blockIdx.x * TILE_WIDTH + ds_col - BLUR_SIZE;
+
+        // global image bound
+        if (g_row > -1 && g_row < height && g_col > -1 && g_col < width) {
+            ds_img_block[ds_row][ds_col] = in[g_row * width + g_col];
+        } else {
+            // Prevent undefined behavior
+            ds_img_block[ds_row][ds_col] = {0,0,0};
+        }
+    }
+
+    __syncthreads();
+
+	if (col < width && row < height) {
+		int3 pixVal;
+		pixVal.x = 0; pixVal.y = 0; pixVal.z = 0;
+		int pixels = 0;
+
+		// get the average of the surrounding 2xBLUR_SIZE x 2xBLUR_SIZE box
+		for(int blurRow = -BLUR_SIZE; blurRow < BLUR_SIZE + 1; blurRow++) {
+			for (int blurCol = -BLUR_SIZE; blurCol < BLUR_SIZE + 1; blurCol++) {
+				// Position in ds_img_block depends on thread
+                int curRow = threadIdx.y + BLUR_SIZE + blurRow;
+				int curCol = threadIdx.x + BLUR_SIZE + blurCol;
+
+				// verify that we have a valid image pixel
+				if(curRow > -1 && curRow < height && curCol > -1 && curCol < width) {
+                    // Load entries into block shared memory
+					pixVal.x += ds_img_block[curRow][curCol].x;
+					pixVal.y += ds_img_block[curRow][curCol].y;
+					pixVal.z += ds_img_block[curRow][curCol].z;
+					pixels++; // keep track of number of pixels in the accumulated total
+				}
+			}
+		}
+
+		// write our new pixel value out
+		out[row * width + col].x = (unsigned char)(pixVal.x / pixels);
+		out[row * width + col].y = (unsigned char)(pixVal.y / pixels);
+		out[row * width + col].z = (unsigned char)(pixVal.z / pixels);
+	}
+}
+
+int main(int argc, char **argv) {
+    if (argc != 2) {
+        cerr << "format: " << argv[0] << " { 24-bit BMP Image Filename }" << endl;
+        exit(1);
+    }
+    
+    bitmap_image bmp(argv[1]);
+
+    if(!bmp) {
+        cerr << "Image not found" << endl;
+        exit(1);
+    }
+
+    int height = bmp.height();
+    int width = bmp.width();
+    
+    cout << "Image dimensions:" << endl;
+    cout << "height: " << height << " width: " << width << endl;
+
+    cout << "Blurring " << argv[1] << endl;
+
+    //Transform image into vector of doubles
+    vector<uchar3> input_image;
+    rgb_t color;
+    for(int y = 0; y < height; y++) {
+        for(int x = 0; x < width; x++) {
+            bmp.get_pixel(x, y, color);
+            input_image.push_back( {color.red, color.green, color.blue} );
+        }
+    }
+
+    vector<uchar3> output_image(input_image.size());
+
+    uchar3 *d_in, *d_out;
+    int img_size = (input_image.size() * sizeof(char) * 3);
+    CHECK_CUDA(cudaMalloc(&d_in, img_size));
+    CHECK_CUDA(cudaMalloc(&d_out, img_size));
+
+    CHECK_CUDA(cudaMemcpy(d_in, input_image.data(), img_size, cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(d_out, input_image.data(), img_size, cudaMemcpyHostToDevice));
+
+    dim3 dimGrid(ceil(width / TILE_WIDTH), ceil(height / TILE_WIDTH));
+    dim3 dimBlock(TILE_WIDTH, TILE_WIDTH);
+
+    cudaEvent_t start, stop;
+    CHECK_CUDA(cudaEventCreate(&start));
+    CHECK_CUDA(cudaEventCreate(&stop));
+
+    CHECK_CUDA(cudaEventRecord(start));
+    blurKernel<<< dimGrid , dimBlock >>> (d_in, d_out, width, height);
+    cudaDeviceSynchronize();
+
+    CHECK_CUDA(cudaMemcpy(output_image.data(), d_out, img_size, cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaEventRecord(stop));
+    CHECK_CUDA(cudaEventSynchronize(stop));
+    
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    printf("Kernel execution time: %f ms\n", milliseconds);
+    
+    //Set updated pixels
+    for(int y = 0; y < height; y++) {
+        for(int x = 0; x < width; x++) {
+            int pos = y * width + x;
+            bmp.set_pixel(x, y, output_image[pos].x, output_image[pos].y, output_image[pos].z);
+        }
+    }
+
+    cout << "Conversion complete." << endl;
+    
+    bmp.save_image("./blurred.bmp");
+
+    cudaFree(d_in);
+    cudaFree(d_out);
+}

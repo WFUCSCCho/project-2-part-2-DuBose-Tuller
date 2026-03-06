@@ -1,0 +1,192 @@
+I was handed blur_kernel and told that it would blur images in my assignment outlined in @README.md . However, I notice that it only seems to work correctly on the image that came with the assignment, which is 800x800. On my own images, something seems to get off. I encountered this issue in a previous assignment, and the answer had to do with row-vs-column major traversal, but this main loop seems to be row-major. Any ideas?
+Let me look at the current blur.cu file to understand the issue.
+
+Read blur.cu
+Found it. There are two mismatched indexing schemes that cancel out on a square image but break on non-square ones.
+
+The core problem: two different linearization strategies are used.
+
+1. Image loading loop (blur.cu:80-85) — column-major order:
+
+
+for(int x = 0; x < width; x++) {
+    for(int y = 0; y < height; y++) {
+        // stores pixel at index: x * height + y  (column-major)
+This iterates x (column) in the outer loop, y (row) in the inner loop, so pixel (x, y) lands at index x * height + y.
+
+2. The kernel (blur.cu:41-43) — row-major order:
+
+
+in[curRow * width + curCol]
+The kernel expects pixel (col, row) at index row * width + col (row-major).
+
+3. The output loop (blur.cu:117-122) — also column-major:
+
+
+int pos = x * height + y;
+This reads back using column-major, which matches the load loop but not the kernel.
+
+When width == height (e.g. 800×800), row * width + col and col * height + row produce the same values, so the bug is invisible. On any non-square image, the kernel reads/writes pixels from the wrong positions.
+
+The fix: Make everything consistent. The simplest approach is to make the load and save loops row-major to match the kernel — swap the loop order so y (row) is outer and x (col) is inner, and update the index to y * width + x:
+
+
+// Loading:
+for(int y = 0; y < height; y++) {
+    for(int x = 0; x < width; x++) {
+        bmp.get_pixel(x, y, color);
+        input_image.push_back({color.red, color.green, color.blue});
+    }
+}
+
+// Saving:
+for(int y = 0; y < height; y++) {
+    for(int x = 0; x < width; x++) {
+        int pos = y * width + x;
+        bmp.set_pixel(x, y, output_image[pos].x, output_image[pos].y, output_image[pos].z);
+    }
+}
+This makes the host-side layout match what the kernel expects: pixel (x, y) at index y * width + x.
+
+Compare to the code of the previous version (this one works correctly) #include <iostream>
+#include <vector>
+
+#include <cuda.h>
+#include <vector_types.h>
+
+#include "bitmap_image.hpp"
+
+// Max threads for each dimension of a 2D block
+#define T 32 
+
+using namespace std;
+
+// Helper macro for error checking
+#define CHECK_CUDA(call) { \
+    cudaError_t err = call; \
+    if (err != cudaSuccess) { \
+        printf("CUDA Error: %s at line %d\n", cudaGetErrorString(err), __LINE__); \
+        exit(1); \
+    } \
+}
+
+__global__ void color_to_grey(uchar3 *input_image, uchar3 *output_image, int width, int height) {
+
+    // Convert color to grayscale by mapping components of uchar3 to RGB
+    // x -> R; y -> G; z -> B
+    // Apply the formula:
+    // output = 0.299f * R + 0.578f * G + 0.114f * B
+    // Hint: First create a mapping from 2D block and grid locations to an
+    // absolute 2D location in the image then use that to calculate a 1D offset
+    int pos_x = blockIdx.x * blockDim.x + threadIdx.x;
+    int pos_y = blockIdx.y * blockDim.y + threadIdx.y;
+    int pos = pos_x * height + pos_y;
+
+    if (pos_x < width && pos_y < height) {
+        uchar3 in_col = input_image[pos];
+        unsigned char R = in_col.x;
+        unsigned char G = in_col.y;
+        unsigned char B = in_col.z;
+        float intensity = 0.299f * R + 0.578f * G + 0.114f * B;
+        unsigned char output = (unsigned char)intensity;
+
+        uchar3 out_col = {output, output, output};
+        output_image[pos] = out_col;
+    }
+}
+
+
+int main(int argc, char **argv) {
+    if (argc != 2) {
+        cerr << "format: " << argv[0] << " { 24-bit BMP Image Filename }" << endl;
+        exit(1);
+    }
+    
+    bitmap_image bmp(argv[1]);
+
+    if(!bmp) {
+        cerr << "Image not found" << endl;
+        exit(1);
+    }
+
+    int height = bmp.height();
+    int width = bmp.width();
+    
+    cout << "Image dimensions:" << endl;
+    cout << "height: " << height << " width: " << width << endl;
+
+    cout << "Converting " << argv[1] << " from color to grayscale..." << endl;
+
+    //Transform image into vector of doubles
+    vector<uchar3> input_image;
+    rgb_t color;
+
+    // Column-major order
+    for(int x = 0; x < width; x++) {
+        for(int y = 0; y < height; y++) {
+            bmp.get_pixel(x, y, color);
+            input_image.push_back( {color.red, color.green, color.blue} );
+        }
+    }
+
+    vector<uchar3> output_image(input_image.size());
+
+    uchar3 *d_in, *d_out;
+    int img_size = (input_image.size() * sizeof(char) * 3);
+    CHECK_CUDA(cudaMalloc(&d_in, img_size));
+    CHECK_CUDA(cudaMalloc(&d_out, img_size));
+
+    CHECK_CUDA(cudaMemcpy(d_in, input_image.data(), img_size, cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(d_out, input_image.data(), img_size, cudaMemcpyHostToDevice));
+
+    dim3 dimGrid((width / T) + 1, (height / T) + 1, 1);
+    dim3 dimBlock(T,T);
+
+    color_to_grey<<< dimGrid , dimBlock >>> (d_in, d_out, width, height);
+    CHECK_CUDA(cudaDeviceSynchronize());
+
+    CHECK_CUDA(cudaMemcpy(output_image.data(), d_out, img_size, cudaMemcpyDeviceToHost));
+    
+    
+    //Set updated pixels
+    for(int x = 0; x < width; x++) {
+        for(int y = 0; y < height; y++) {
+            int pos = x * height + y;
+            bmp.set_pixel(x, y, output_image[pos].x, output_image[pos].y, output_image[pos].z);
+        }
+    }
+
+    cout << "Conversion complete." << endl;
+    
+    bmp.save_image("./grayscaled.bmp");
+
+    cudaFree(d_in);
+    cudaFree(d_out);
+}
+The loading and saving diffs between these files are the same as far as I can tell. I imagine it will be easier to change the load to be row major instead?
+You're right — the grayscale kernel also uses pos_x * height + pos_y (column-major indexing), so it's internally consistent with the column-major load/save loops. The blur kernel uses row * width + col (row-major), which is the mismatch.
+
+The simplest fix is to make the blur kernel use column-major indexing to match the existing load/save loops. In blur.cu, col maps to x and row maps to y, so the index should be col * height + row:
+
+Edit blur.cu
+Edit failed
+Would changing the load in to row major work?
+Yes — changing the load loop to row-major would also work, and arguably makes more sense since row-major is the conventional layout. You'd swap the loop order and update the index:
+
+
+for(int y = 0; y < height; y++) {
+    for(int x = 0; x < width; x++) {
+        bmp.get_pixel(x, y, color);
+        input_image.push_back({color.red, color.green, color.blue});
+    }
+}
+And the save loop:
+
+
+for(int y = 0; y < height; y++) {
+    for(int x = 0; x < width; x++) {
+        int pos = y * width + x;
+        bmp.set_pixel(x, y, output_image[pos].x, output_image[pos].y, output_image[pos].z);
+    }
+}
+The kernel already uses row * width + col, so it would be consistent across all three. Want me to apply these changes?
