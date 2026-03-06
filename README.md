@@ -44,3 +44,32 @@ Part 2 of your project will be submitted via GitHub and the link to your reposit
 
 **Pledged Work Policy** 
 You may only seek aid from the course professor or explicitly specified assistants. Tutors are not permitted. You may discuss only basic C/C++ syntax with others. Any other discussions of the project are strictly prohibited.Your code and implementation must be the product of your own work.
+
+
+## Blur Kernel with Shared Memory
+My idea to improve performance via shared block memory was to load all of the data needed by the block into a shared array `ds_img_block`, which the parts of the image corresponding to a block and the pixed beyond it with radius `BLUR_SIZE`. The primary challenge with this approach is that each thread would be responsible for loading more than one item into the shared memory. If we want to ensure no overlap and high efficiency, then we need to divide the pixels to be loaded evenly among all threads. This is acheived via linearization of all the pixels in the block + border portion of the image. The main `for` loop iterates over all pixel to be loaded by the block of threads, skipping by the number of threads in the block, and offset by the thread's linear ID.
+
+After the data is loaded into shared memory, the computation phase is largely unchanged from the original code. Below are the timing results comparing the two methods on a handful of images.
+
+| Method | Image | Time (ms)|
+| ---   | ---     | ---  |
+| Naive | `meme0` | 3.22 |
+| Naive | `meme1` | 2.07 |
+| Naive | `snow`  | 2.92 |
+| Naive | `grumpy`| 2.87 |
+| Tiled | `meme0` | 4.31 |
+| Tiled | `meme1` | 2.88 |
+| Tiled | `snow`  | 3.55 |
+| Tiled | `grumpy`| 3.36 |
+
+Below are the dimensions of each image:
+
+| Image   | Height | Width | Total Pixels |
+| ---     | :---:  | :---: | :---:        |
+| `meme0` | 1166   | 1027  | 1,197,482    |
+| `meme1` | 405    | 562   | 227,610      |
+| `snow`  | 768    | 1024  | 786,432      |
+| `grumpy`| 800    | 800   | 640,000      |
+
+
+Unfortunately, this tiling method results in a slight slowdown, although the percentage difference decreases with larger images.  Perhaps this method might be useful for large images or for equivalent input data.
